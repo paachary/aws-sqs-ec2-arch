@@ -67,9 +67,14 @@ def resize_image(bucket_name, key, size):
                     key=resized_key)
     obj.put(Body=buffer, ContentType='image/jpeg')
 
+    print(f'uploaded the resized image to S3 bucket {bucket_name}')
+
 
 def process_message(message_body):
-    print(message_body)
+    bucket = message.message_attributes.get('S3Bucket').get('StringValue')
+    key = message.message_attributes.get('S3Key').get('StringValue')
+    print(" bucket is {} and key = {}".format(bucket, key))
+    resize_image(bucket, key, IMAGE_SIZE)
 
 
 if __name__ == '__main__':
@@ -78,10 +83,11 @@ if __name__ == '__main__':
 
     signal_handler = SignalHandler()
     while not signal_handler.received_signal:
-        messages = get_queue().receive_messages(MaxNumberOfMessages=10, WaitTimeSeconds=1, )
+        messages = get_queue().receive_messages(MessageAttributeNames=["All"], MaxNumberOfMessages=10,
+                                                WaitTimeSeconds=1)
         for message in messages:
             try:
-                process_message(message.body)
+                process_message(message)
             except Exception as e:
                 print(f"exception while processing message: {repr(e)}")
                 continue
