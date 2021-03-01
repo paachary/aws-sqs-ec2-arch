@@ -1,0 +1,308 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: |
+  This cloud formation template creates a lambda function which reads an S3 bucket for uploaded items
+  and publishes the relevant data into a queue.
+Parameters:
+  LambdaFunctionName:
+    Description: The name of the lamdba function
+    Type: String
+    Default: s3-processor-lambda
+
+  InstanceAmiId:
+    Description: An ec2 instance AMI id
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: '/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2'
+
+  BucketNamePrefix:
+    Description: The bucket name where the photos are uploaded
+    Type: String
+    Default: s3-image-upload-bucket
+
+  DesiredCapacity:
+    Description: The desired number of instances maintained by the ASG
+    Type: String
+    Default: 0
+
+  MinInstances:
+    Description: The minimum number of instances maintained by the ASG
+    Type: String
+    Default: 0
+
+  MaxInstances:
+    Description: The maximum number of instances that can be spun up by the ASG
+    Type: String
+    Default: 0    
+  
+Resources:
+
+  ImageQueue:
+    Type: AWS::SQS::Queue
+
+  InstanceRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+              - ec2.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
+        - "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+        - "arn:aws:iam::aws:policy/SecretsManagerReadWrite"
+        - "arn:aws:iam::aws:policy/AmazonSQSFullAccess"
+        - "arn:aws:iam::aws:policy/AmazonS3FullAccess"
+
+  InstanceProfile:
+    Type: 'AWS::IAM::InstanceProfile'
+    DependsOn: InstanceRole
+    Properties:
+      Path: /
+      Roles:
+        - Ref: InstanceRole    
+
+  Ec2LaunchTemplate:
+    Type: "AWS::EC2::LaunchTemplate"
+    DependsOn: InstanceProfile
+    Properties:
+      LaunchTemplateName: sqs-consumer--launch-template
+      LaunchTemplateData:
+          IamInstanceProfile:
+            Name: !Ref InstanceProfile
+          ImageId: !Ref InstanceAmiId
+          InstanceType: "t2.micro"
+          SecurityGroupIds:
+            - !ImportValue webapp-security-group
+          TagSpecifications:
+            - ResourceType: instance
+              Tags:
+                - Key: Name
+                  Value: SQS-Consumer-Instance            
+          UserData:
+            Fn::Base64: !Sub |
+              #!/bin/bash -xe
+              yum -y update
+              yum -y upgrade
+
+              ## Installing all the required software
+              yum -y install python3 git jq
+
+              ## configuring the environment
+              cd /home/ec2-user
+
+              rm -fr /usr/local/aws
+              rm -fr /usr/local/bin/aws
+
+              curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+              unzip awscliv2.zip
+
+              ./aws/install
+
+              ln -fs /usr/local/bin/aws /bin/aws
+
+              ln -fs /usr/bin/pip-3.7 /usr/bin/pip
+              ln -fs /usr/bin/pip-3 /usr/bin/pip
+              ln -fs /usr/bin/pip3 /usr/bin/pip
+
+              aws configure set region `curl --silent http://169.254.169.254/latest/dynamic/instance-identity/document | jq -r .region`
+
+              ## Installing the sqs consumer app
+              cd /home/ec2-user
+              git clone https://github.com/paachary/aws-sqs-ec2-arch.git
+
+              chown ec2-user:root -R aws-sqs-ec2-arch/
+
+              cd /home/ec2-user/aws-sqs-ec2-arch
+
+              pip install install virtualenv
+              virtualenv myenv
+              . myenv/bin/activate
+              pip install -r requirements.txt
+
+              export QUEUE_NAME=${ImageQueue.QueueName}
+              export IMAGE_SIZE=400x400
+              python sqs_consumer_image_processor.py
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    DependsOn: ImageQueue
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/"
+      Policies:
+      - PolicyName: root
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+              - logs:*
+            Resource: arn:aws:logs:*:*:*
+          - Effect: Allow
+            Action:
+              - sqs:*
+            Resource: arn:aws:sqs:*:*:*
+          - Effect: Allow
+            Action:
+              - s3:*
+            Resource: arn:aws:s3:::*
+          - Effect: Allow
+            Action:
+              - ec2:CreateNetworkInterface
+              - ec2:DescribeNetworkInterfaces
+              - ec2:DeleteNetworkInterface
+              - ec2:DescribeInstances
+              - ec2:AttachNetworkInterface
+            Resource: "*"
+
+  S3Processor:
+    Type: AWS::Lambda::Function
+    Properties:
+      Environment:
+        Variables:
+          QUEUE_NAME: !GetAtt ImageQueue.QueueName
+      Runtime: python3.8
+      Role: !GetAtt LambdaExecutionRole.Arn
+      VpcConfig:
+        SecurityGroupIds:
+          - !ImportValue webapp-security-group
+        SubnetIds:
+          - !ImportValue  vpc-subnet-appa
+          - !ImportValue  vpc-subnet-appb
+          - !ImportValue  vpc-subnet-appc
+      Handler: index.handler
+      Code:
+        ZipFile: !Sub |
+            import os
+            import boto3
+            QUEUE_NAME = os.getenv("QUEUE_NAME")
+            SQS = boto3.client("sqs")
+
+
+            def get_queue_url():
+                """ Retrieve the SQS queue url from the queue name"""
+                return SQS.get_queue_url(QueueName=QUEUE_NAME).get('QueueUrl')
+
+            def handler(event, context):
+                """The lambda Handler"""
+                """Fetch the bucket and the key from the event"""
+                for record in event['Records']:
+                    bucket = record['s3']['bucket']['name']
+                    key = record['s3']['object']['key']
+                    print("key = {}".format(key))
+                    if (key.split('/')[1].strip(' ') != ''):
+                      response = SQS.send_message(
+                          QueueUrl=get_queue_url(),
+                          MessageBody='s3-file',
+                          MessageAttributes={
+                              'S3Bucket': {
+                                  'StringValue': bucket,
+                                  'DataType': 'String'
+                              },
+                              'S3Key': {
+                                  'StringValue': key,
+                                  'DataType': 'String'
+                              }
+                          })
+                      print(f'Response is {response}')
+
+  BucketPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: 'lambda:InvokeFunction'
+      FunctionName: !Ref S3Processor
+      Principal: s3.amazonaws.com
+      SourceAccount: !Ref "AWS::AccountId"
+      SourceArn: !Join
+            - ''
+            - - 'arn:aws:s3:::'
+              - !Ref BucketNamePrefix
+              - '-'
+              - !Select
+                - 0
+                - !Split
+                  - "-"
+                  - !Select
+                    - 2
+                    - !Split
+                      - "/"
+                      - !Ref "AWS::StackId"
+
+  S3Bucket:
+    DependsOn: BucketPermission
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Join
+            - '-'
+            - - !Ref BucketNamePrefix
+              - !Select
+                - 0
+                - !Split
+                  - "-"
+                  - !Select
+                    - 2
+                    - !Split
+                      - "/"
+                      - !Ref "AWS::StackId"
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: s3:ObjectCreated:Put
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: images/
+            Function: !GetAtt S3Processor.Arn
+
+  SqsVpcInterfaceEndPoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties: 
+      PrivateDnsEnabled: true
+      SecurityGroupIds: 
+        - !ImportValue webapp-security-group
+      ServiceName: com.amazonaws.us-east-1.sqs
+      SubnetIds: 
+        - !ImportValue  vpc-subnet-appa
+        - !ImportValue  vpc-subnet-appb
+        - !ImportValue  vpc-subnet-appc
+      VpcEndpointType: Interface
+      VpcId: !ImportValue vpc       
+
+  SQSConsumerInstance:
+    Type: AWS::EC2::Instance
+    DependsOn: Ec2LaunchTemplate
+    Properties: 
+      LaunchTemplate: 
+        LaunchTemplateName: sqs-consumer--launch-template
+        Version: 1
+      SubnetId: !ImportValue vpc-subnet-appa               
+
+Outputs:
+  S3Bucket:
+    Description: The s3 bucket
+    Value: !Ref S3Bucket
+
+  LambdaFunction:
+    Description: The S3 processor lambda function
+    Value: !Ref S3Processor    
+
+  Ec2LaunchTemplate:
+    Description: The ec2 launch template for sqs consumer.
+    Value: !Ref Ec2LaunchTemplate
+
+  SqsVpcInterfaceEndPoint:
+    Description: The vpc endpoint for SQS swervice for us-east-1
+    Value: !Ref SqsVpcInterfaceEndPoint

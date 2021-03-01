@@ -1,0 +1,148 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description:
+  A template for creating a NAT gateway, Elastic public ip, a route table and a mapping
+
+Resources:
+
+  EIPRegionA:
+    Type: AWS::EC2::EIP
+    Properties:
+        Domain: vpc
+
+  NATRegionA:
+    Type: AWS::EC2::NatGateway
+    Properties:
+        AllocationId:
+          Fn::GetAtt:
+          - EIPRegionA
+          - AllocationId
+        SubnetId: !ImportValue vpc-subnet-weba
+        Tags:
+        - Key: Name
+          Value: Nat-Gateway-Region-A
+
+  VpcRouteTableRegionA:
+      Type: AWS::EC2::RouteTable
+      DependsOn: NATRegionA
+      Properties: 
+        Tags: 
+          - Key: Name
+            Value: vpc-private-rt-A
+        VpcId: !ImportValue vpc
+
+  RouteRegionA:
+    Type: AWS::EC2::Route
+    Properties:
+        RouteTableId:
+          Ref: VpcRouteTableRegionA
+        DestinationCidrBlock: 0.0.0.0/0
+        NatGatewayId:
+          Ref: NATRegionA   
+
+  SubnetRoute1TableAssocRegionA:
+      Type: AWS::EC2::SubnetRouteTableAssociation
+      Properties: 
+          RouteTableId: !Ref VpcRouteTableRegionA
+          SubnetId: !ImportValue vpc-subnet-dba
+
+  SubnetRoute2TableAssocRegionA:
+      Type: AWS::EC2::SubnetRouteTableAssociation
+      Properties: 
+          RouteTableId: !Ref VpcRouteTableRegionA
+          SubnetId: !ImportValue vpc-subnet-appa
+
+  EIPRegionB:
+    Type: AWS::EC2::EIP
+    Properties:
+        Domain: vpc          
+
+  NATRegionB:
+    Type: AWS::EC2::NatGateway
+    Properties:
+        AllocationId:
+          Fn::GetAtt:
+          - EIPRegionB
+          - AllocationId
+        SubnetId: !ImportValue vpc-subnet-webb
+        Tags:
+        - Key: Name
+          Value: Nat-Gateway-Region-B
+
+  VpcRouteTableRegionB:
+      Type: AWS::EC2::RouteTable
+      DependsOn: NATRegionB
+      Properties: 
+        Tags: 
+          - Key: Name
+            Value: vpc-private-rt-B
+        VpcId: !ImportValue vpc  
+
+  RouteRegionB:
+    Type: AWS::EC2::Route
+    Properties:
+        RouteTableId:
+          Ref: VpcRouteTableRegionB
+        DestinationCidrBlock: 0.0.0.0/0
+        NatGatewayId:
+          Ref: NATRegionB
+
+  SubnetRoute1TableAssocRegionB:
+      Type: AWS::EC2::SubnetRouteTableAssociation
+      Properties: 
+          RouteTableId: !Ref VpcRouteTableRegionB
+          SubnetId: !ImportValue vpc-subnet-dbb
+
+  SubnetRoute2TableAssocRegionB:
+      Type: AWS::EC2::SubnetRouteTableAssociation
+      Properties: 
+          RouteTableId: !Ref VpcRouteTableRegionB
+          SubnetId: !ImportValue vpc-subnet-appb   
+
+  EIPRegionC:
+    Type: AWS::EC2::EIP
+    Properties:
+        Domain: vpc
+
+  NATRegionC:
+    Type: AWS::EC2::NatGateway
+    Properties:
+        AllocationId:
+          Fn::GetAtt:
+          - EIPRegionC
+          - AllocationId
+        SubnetId: !ImportValue vpc-subnet-webc
+        Tags:
+        - Key: Name
+          Value: Nat-Gateway-Region-C
+
+
+  VpcRouteTableRegionC:
+      Type: AWS::EC2::RouteTable
+      DependsOn: NATRegionC
+      Properties: 
+        Tags: 
+          - Key: Name
+            Value: vpc-private-rt-C
+        VpcId: !ImportValue vpc        
+
+  RouteRegionC:
+    Type: AWS::EC2::Route
+    Properties:
+        RouteTableId:
+          Ref: VpcRouteTableRegionC
+        DestinationCidrBlock: 0.0.0.0/0
+        NatGatewayId:
+          Ref: NATRegionC
+
+  SubnetRoute1TableAssocRegionC:
+      Type: AWS::EC2::SubnetRouteTableAssociation
+      Properties: 
+          RouteTableId: !Ref VpcRouteTableRegionC
+          SubnetId: !ImportValue vpc-subnet-dbc
+
+  SubnetRoute2TableAssocRegionC:
+      Type: AWS::EC2::SubnetRouteTableAssociation
+      Properties: 
+          RouteTableId: !Ref VpcRouteTableRegionC
+          SubnetId: !ImportValue vpc-subnet-appc          
